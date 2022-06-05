@@ -1,19 +1,19 @@
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include "esp_event.h"
+#include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_system.h"
+#include "esp_tls.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_log.h"
-#include "esp_system.h"
 #include "nvs_flash.h"
-#include "esp_event.h"
-#include "esp_netif.h"
-#include "esp_tls.h"
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
-#include "esp_crt_bundle.h"
+#    include "esp_crt_bundle.h"
 #endif
 
-#include "esp_http_client.h"
 #include "bot.h"
+#include "esp_http_client.h"
 
 #define MAX_HTTP_RECV_BUFFER 512
 #define MAX_HTTP_OUTPUT_BUFFER 2048
@@ -21,16 +21,17 @@
 #define TELEGRAM_BOT_API_KEY CONFIG_TELEGRAM_BOT_API_KEY
 #define TELEGRAM_BOT_ADMIN_ID CONFIG_TELEGRAM_BOT_ADMIN_ID
 
-static const char *TAG = "BOT";
+static const char * TAG = "BOT";
 
 extern const char api_telegram_org_root_cert_start[] asm("_binary_api_telegram_org_root_cert_pem_start");
-extern const char api_telegram_org_root_cert_end[]   asm("_binary_api_telegram_org_root_cert_pem_end");
+extern const char api_telegram_org_root_cert_end[] asm("_binary_api_telegram_org_root_cert_pem_end");
 
-esp_err_t _http_event_handler(esp_http_client_event_t *evt)
+esp_err_t _http_event_handler(esp_http_client_event_t * evt)
 {
-    static char *output_buffer;  // Buffer to store response of http request from event handler
-    static int output_len;       // Stores number of bytes read
-    switch(evt->event_id) {
+    static char * output_buffer; // Buffer to store response of http request from event handler
+    static int output_len; // Stores number of bytes read
+    switch (evt->event_id)
+    {
         case HTTP_EVENT_ERROR:
             ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
             break;
@@ -49,15 +50,21 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
              *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
              *  However, event handler can also be used in case chunked encoding is used.
              */
-            if (!esp_http_client_is_chunked_response(evt->client)) {
+            if (!esp_http_client_is_chunked_response(evt->client))
+            {
                 // If user_data buffer is configured, copy the response into the buffer
-                if (evt->user_data) {
-                    memcpy((char *) evt->user_data + output_len, evt->data, evt->data_len);
-                } else {
-                    if (output_buffer == NULL) {
-                        output_buffer = (char *) malloc(esp_http_client_get_content_length(evt->client) + 1);
+                if (evt->user_data)
+                {
+                    memcpy((char *)evt->user_data + output_len, evt->data, evt->data_len);
+                }
+                else
+                {
+                    if (output_buffer == NULL)
+                    {
+                        output_buffer = (char *)malloc(esp_http_client_get_content_length(evt->client) + 1);
                         output_len = 0;
-                        if (output_buffer == NULL) {
+                        if (output_buffer == NULL)
+                        {
                             ESP_LOGE(TAG, "Failed to allocate memory for output buffer");
                             return ESP_FAIL;
                         }
@@ -70,24 +77,26 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             break;
         case HTTP_EVENT_ON_FINISH:
             ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
-            if (output_buffer != NULL) {
+            if (output_buffer != NULL)
+            {
                 ESP_LOG_BUFFER_HEX(TAG, output_buffer, output_len);
                 free(output_buffer);
                 output_buffer = NULL;
             }
             output_len = 0;
             break;
-        case HTTP_EVENT_DISCONNECTED:
-        {
+        case HTTP_EVENT_DISCONNECTED: {
             ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
 
             int mbedtls_err = 0;
             esp_err_t err = esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data, &mbedtls_err, NULL);
-            if (err != 0) {
+            if (err != 0)
+            {
                 ESP_LOGI(TAG, "Last esp error code: 0x%x", err);
                 ESP_LOGI(TAG, "Last mbedtls failure: 0x%x", mbedtls_err);
             }
-            if (output_buffer != NULL) {
+            if (output_buffer != NULL)
+            {
                 free(output_buffer);
                 output_buffer = NULL;
             }
@@ -103,11 +112,11 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static void query(const char *method, char *post_data)
+static void query(const char * method, char * post_data)
 {
     char query_buf[100];
 
-    strcpy(query_buf, "https://api.telegram.org/bot"  TELEGRAM_BOT_API_KEY  "/");
+    strcpy(query_buf, "https://api.telegram.org/bot" TELEGRAM_BOT_API_KEY "/");
     strcpy(query_buf + strlen(query_buf), method);
     ESP_LOGI(TAG, "making query to url = %s, url len = %zu", query_buf, strlen(query_buf));
 
@@ -124,40 +133,46 @@ static void query(const char *method, char *post_data)
 
     if (post_data != NULL)
     {
-		esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_header(client, "Content-Type", "application/json");
         esp_http_client_set_post_field(client, post_data, strlen(post_data));
     }
 
-    while (1) {
+    while (1)
+    {
         err = esp_http_client_perform(client);
-        if (err != ESP_ERR_HTTP_EAGAIN) {
+        if (err != ESP_ERR_HTTP_EAGAIN)
+        {
             break;
         }
     }
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "HTTPS Status = %d, content_length = %lld",
-                esp_http_client_get_status_code(client),
-                esp_http_client_get_content_length(client));
-
-    } else {
+    if (err == ESP_OK)
+    {
+        ESP_LOGI(
+            TAG,
+            "HTTPS Status = %d, content_length = %lld",
+            esp_http_client_get_status_code(client),
+            esp_http_client_get_content_length(client));
+    }
+    else
+    {
         ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
     }
 
     esp_http_client_cleanup(client);
 }
 
-void sendMessageToAdminTask(void *text)
+void sendMessageToAdminTask(void * text)
 {
-	const char *format = "{\"chat_id\": " TELEGRAM_BOT_ADMIN_ID ", \"text\": \"%s\"}";
-	char *msg = malloc(strlen(format) + strlen(text) + 10);
-	sprintf(msg, format, text);
+    const char * format = "{\"chat_id\": " TELEGRAM_BOT_ADMIN_ID ", \"text\": \"%s\"}";
+    char * msg = malloc(strlen(format) + strlen(text) + 10);
+    sprintf(msg, format, text);
     query("sendMessage", msg);
-	free(msg);
+    free(msg);
 
     vTaskDelete(NULL);
 }
 
-void sendMessageToAdmin(char *text)
+void sendMessageToAdmin(char * text)
 {
     xTaskCreate(&sendMessageToAdminTask, "http main loop", 8192, text, 5, NULL);
 }
