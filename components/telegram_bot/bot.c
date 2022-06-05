@@ -19,6 +19,7 @@
 #define MAX_HTTP_OUTPUT_BUFFER 2048
 
 #define TELEGRAM_BOT_API_KEY CONFIG_TELEGRAM_BOT_API_KEY
+#define TELEGRAM_BOT_ADMIN_ID CONFIG_TELEGRAM_BOT_ADMIN_ID
 
 static const char *TAG = "BOT";
 
@@ -43,7 +44,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
             break;
         case HTTP_EVENT_ON_DATA:
-            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
             /*
              *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
              *  However, event handler can also be used in case chunked encoding is used.
@@ -51,10 +52,10 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             if (!esp_http_client_is_chunked_response(evt->client)) {
                 // If user_data buffer is configured, copy the response into the buffer
                 if (evt->user_data) {
-                    memcpy(evt->user_data + output_len, evt->data, evt->data_len);
+                    memcpy((char *) evt->user_data + output_len, evt->data, evt->data_len);
                 } else {
                     if (output_buffer == NULL) {
-                        output_buffer = (char *) malloc(esp_http_client_get_content_length(evt->client));
+                        output_buffer = (char *) malloc(esp_http_client_get_content_length(evt->client) + 1);
                         output_len = 0;
                         if (output_buffer == NULL) {
                             ESP_LOGE(TAG, "Failed to allocate memory for output buffer");
@@ -70,15 +71,16 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
         case HTTP_EVENT_ON_FINISH:
             ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
             if (output_buffer != NULL) {
-                // Response is accumulated in output_buffer. Uncomment the below line to print the accumulated response
-                // ESP_LOG_BUFFER_HEX(TAG, output_buffer, output_len);
+                ESP_LOG_BUFFER_HEX(TAG, output_buffer, output_len);
                 free(output_buffer);
                 output_buffer = NULL;
             }
             output_len = 0;
             break;
         case HTTP_EVENT_DISCONNECTED:
+        {
             ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+
             int mbedtls_err = 0;
             esp_err_t err = esp_tls_get_and_clear_last_error((esp_tls_error_handle_t)evt->data, &mbedtls_err, NULL);
             if (err != 0) {
@@ -91,6 +93,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             }
             output_len = 0;
             break;
+        }
         case HTTP_EVENT_REDIRECT:
             ESP_LOGD(TAG, "HTTP_EVENT_REDIRECT");
             esp_http_client_set_header(evt->client, "From", "user@example.com");
@@ -100,23 +103,31 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
     return ESP_OK;
 }
 
-static void https_async(void)
+static void query(const char *method, char *post_data)
 {
+    char query_buf[100];
+
+    strcpy(query_buf, "https://api.telegram.org/bot"  TELEGRAM_BOT_API_KEY  "/");
+    strcpy(query_buf + strlen(query_buf), method);
+    ESP_LOGI(TAG, "making query to url = %s, url len = %zu", query_buf, strlen(query_buf));
+
     esp_http_client_config_t config = {
-        .url = "https://api.telegram.org/bot"TELEGRAM_BOT_API_KEY"/getMe",
-        .event_handler = _http_event_handler,
+        .url = query_buf,
         .cert_pem = api_telegram_org_root_cert_start,
-        .is_async = true,
         .timeout_ms = 5000,
+        .event_handler = _http_event_handler,
+        .is_async = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     esp_err_t err;
-    const char *post_data = "Using a Palantír requires a person with great strength of will and wisdom. The Palantíri were meant to "
-                            "be used by the Dúnedain to communicate throughout the Realms in Exile. During the War of the Ring, "
-                            "the Palantíri were used by many individuals. Sauron used the Ithil-stone to take advantage of the users "
-                            "of the other two stones, the Orthanc-stone and Anor-stone, but was also susceptible to deception himself.";
     esp_http_client_set_method(client, HTTP_METHOD_POST);
-    //esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    if (post_data != NULL)
+    {
+		esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_post_field(client, post_data, strlen(post_data));
+    }
+
     while (1) {
         err = esp_http_client_perform(client);
         if (err != ESP_ERR_HTTP_EAGAIN) {
@@ -127,21 +138,26 @@ static void https_async(void)
         ESP_LOGI(TAG, "HTTPS Status = %d, content_length = %lld",
                 esp_http_client_get_status_code(client),
                 esp_http_client_get_content_length(client));
+
     } else {
         ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
     }
+
     esp_http_client_cleanup(client);
 }
 
-static void http_main_loop_task(void *pvParameters)
+void sendMessageToAdminTask(void *text)
 {
-    https_async();
+	const char *format = "{\"chat_id\": " TELEGRAM_BOT_ADMIN_ID ", \"text\": \"%s\"}";
+	char *msg = malloc(strlen(format) + strlen(text) + 10);
+	sprintf(msg, format, text);
+    query("sendMessage", msg);
+	free(msg);
 
-    ESP_LOGI(TAG, "Finish http main task");
     vTaskDelete(NULL);
 }
 
-void init_telegram_bot(void)
+void sendMessageToAdmin(char *text)
 {
-    xTaskCreate(&http_main_loop_task, "http main loop", 8192, NULL, 5, NULL);
+    xTaskCreate(&sendMessageToAdminTask, "http main loop", 8192, text, 5, NULL);
 }

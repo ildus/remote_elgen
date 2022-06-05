@@ -158,12 +158,12 @@ void app_main(void)
     ESP_LOGI(TAG, "GPIO CONTROL INIT");
 	init_gpio();
 
+    ESP_LOGI(TAG, "INIT HTTP CLIENT");
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
     wifi_init_sta();
 
-    ESP_LOGI(TAG, "INIT HTTP CLIENT");
-    init_telegram_bot();
+	sendMessageToAdmin("Starter controller has initialized");
 }

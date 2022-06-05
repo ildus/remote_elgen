@@ -6,4 +6,10 @@ menu "Telegram Bot Configuration"
         help
             API key for Telegram Bot
 
+    config TELEGRAM_BOT_ADMIN_ID
+        string "Bot Admin"
+        default "12345"
+        help
+            ID for the bot admin
+
 endmenu

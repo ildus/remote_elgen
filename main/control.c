@@ -9,11 +9,13 @@
 #include "esp_system.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "freertos/timers.h"
 
 #include "hal/gpio_types.h"
+#include "bot.h"
 
 static int STARTER_ON_TIME = 5;
 
@@ -46,11 +48,26 @@ static isr_context contexts[] = {
 
 static void control_relay(bool power_on)
 {
+    static bool turned_on = false;
+
+    if (power_on && turned_on)
+    {
+        ESP_LOGI("relay", "relay is busy");
+        return;
+    }
+
     gpio_set_level(RELAY_PIN, power_on ? 1 : 0);
+    turned_on = power_on;
+
     if (power_on)
+    {
         ESP_LOGI("relay", "turning on");
+    }
     else
+    {
+        sendMessageToAdmin("Relay turned off");
         ESP_LOGI("relay", "turning off");
+    }
 }
 
 static void timer_callback(TimerHandle_t arg)
@@ -70,11 +87,14 @@ static void open_relay(void)
     }
     else
     {
+        sendMessageToAdmin("Will turn on the relay in few seconds");
         timer_handle = xTimerCreate("relay pin control off", pdMS_TO_TICKS(STARTER_ON_TIME * 1000), pdFALSE, NULL, timer_callback);
         if (timer_handle)
         {
-            xTimerStart(timer_handle, 0);
-            control_relay(true);
+            BaseType_t res = xTimerStart(timer_handle, 0);
+            if (res == pdPASS)
+                // enable relay if only everthing ok with timers
+                control_relay(true);
         }
     }
 }
