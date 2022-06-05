@@ -1,0 +1,9 @@
+menu "Telegram Bot Configuration"
+
+    config TELEGRAM_BOT_API_KEY
+        string "Telegram Bot API key"
+        default "bot key"
+        help
+            API key for Telegram Bot
+
+endmenu
