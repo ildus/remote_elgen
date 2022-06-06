@@ -6,6 +6,7 @@
 #include "esp_system.h"
 #include "esp_tls.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/portmacro.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
@@ -25,6 +26,47 @@ static const char * TAG = "BOT";
 
 extern const char api_telegram_org_root_cert_start[] asm("_binary_api_telegram_org_root_cert_pem_start");
 extern const char api_telegram_org_root_cert_end[] asm("_binary_api_telegram_org_root_cert_pem_end");
+
+typedef enum
+{
+    SEND_MESSAGE,
+    GET_UPDATES,
+    DELETE_WEBHOOK
+} TelegramMethod_t;
+
+typedef struct
+{
+    TelegramMethod_t method;
+    char * post_data;
+} Query_t;
+
+static QueueHandle_t queries_q = NULL;
+
+bool make_query(TelegramMethod_t method, char * post_data, bool wait)
+{
+    Query_t * query = malloc(sizeof(Query_t));
+    query->method = method;
+    query->post_data = post_data;
+
+    BaseType_t res;
+
+again:
+    res = xQueueSend(queries_q, (void *)&query, 0);
+
+    if (wait && res == errQUEUE_FULL)
+    {
+        vTaskDelay(10);
+        goto again;
+    }
+
+    if (res != pdPASS)
+    {
+        free(query);
+        return false;
+    }
+
+    return true;
+}
 
 esp_err_t _http_event_handler(esp_http_client_event_t * evt)
 {
@@ -79,7 +121,8 @@ esp_err_t _http_event_handler(esp_http_client_event_t * evt)
             ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
             if (output_buffer != NULL)
             {
-                ESP_LOG_BUFFER_HEX(TAG, output_buffer, output_len);
+                output_buffer[output_len] = '\0';
+                ESP_LOGI(TAG, "%s", output_buffer);
                 free(output_buffer);
                 output_buffer = NULL;
             }
@@ -112,67 +155,132 @@ esp_err_t _http_event_handler(esp_http_client_event_t * evt)
     return ESP_OK;
 }
 
-static void query(const char * method, char * post_data)
+static void queryMakerTask(void * queue)
 {
-    char query_buf[100];
-
-    strcpy(query_buf, "https://api.telegram.org/bot" TELEGRAM_BOT_API_KEY "/");
-    strcpy(query_buf + strlen(query_buf), method);
-    ESP_LOGI(TAG, "making query to url = %s, url len = %zu", query_buf, strlen(query_buf));
-
     esp_http_client_config_t config = {
-        .url = query_buf,
+        .host = "api.telegram.org",
+        .path = "/",
+		.transport_type = HTTP_TRANSPORT_OVER_SSL,
         .cert_pem = api_telegram_org_root_cert_start,
         .timeout_ms = 5000,
         .event_handler = _http_event_handler,
         .is_async = true,
+		.keep_alive_enable = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    esp_err_t err;
-    esp_http_client_set_method(client, HTTP_METHOD_POST);
 
-    if (post_data != NULL)
-    {
-        esp_http_client_set_header(client, "Content-Type", "application/json");
-        esp_http_client_set_post_field(client, post_data, strlen(post_data));
-    }
+    char query_buf[100];
 
-    while (1)
+    Query_t * query;
+
+    while (true)
     {
-        err = esp_http_client_perform(client);
-        if (err != ESP_ERR_HTTP_EAGAIN)
+        BaseType_t res;
+
+        query = NULL;
+        res = xQueueReceive(queries_q, &query, (TickType_t)10000);
+        if (res == errQUEUE_EMPTY)
+            continue;
+
+        char * method;
+        switch (query->method)
         {
-            break;
+            case SEND_MESSAGE:
+                method = "sendMessage";
+                break;
+            case GET_UPDATES:
+                method = "getUpdates";
+                break;
+            case DELETE_WEBHOOK:
+                method = "deleteWebhook";
+                break;
+            default:
+                ESP_LOGI(TAG, "got unknown method for telegram bot");
+                goto cleanup;
+        }
+
+        strcpy(query_buf, "/bot" TELEGRAM_BOT_API_KEY "/");
+        strcpy(query_buf + strlen(query_buf), method);
+        ESP_LOGI(TAG, "making query to url = %s, url len = %zu", query_buf, strlen(query_buf));
+
+        esp_err_t err;
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+        esp_http_client_set_url(client, query_buf);
+
+        if (query->post_data != NULL)
+        {
+            esp_http_client_set_header(client, "Content-Type", "application/json");
+            esp_http_client_set_post_field(client, query->post_data, strlen(query->post_data));
+        }
+        else
+        {
+            esp_http_client_delete_header(client, "Content-Type");
+            esp_http_client_set_post_field(client, NULL, 0);
+        }
+
+        do
+            err = esp_http_client_perform(client);
+        while (err == ESP_ERR_HTTP_EAGAIN);
+
+        if (err == ESP_OK)
+            ESP_LOGI(
+                TAG,
+                "HTTPS Status = %d, content_length = %lld",
+                esp_http_client_get_status_code(client),
+                esp_http_client_get_content_length(client));
+        else
+            ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
+
+    cleanup:
+        if (query)
+        {
+            if (query->post_data != NULL)
+                free(query->post_data);
+
+            free(query);
         }
     }
-    if (err == ESP_OK)
-    {
-        ESP_LOGI(
-            TAG,
-            "HTTPS Status = %d, content_length = %lld",
-            esp_http_client_get_status_code(client),
-            esp_http_client_get_content_length(client));
-    }
-    else
-    {
-        ESP_LOGE(TAG, "Error perform http request %s", esp_err_to_name(err));
-    }
 
+    // unreachable, just in case we will make graceful ending
     esp_http_client_cleanup(client);
+    vTaskDelete(NULL);
 }
 
-void sendMessageToAdminTask(void * text)
+void init_query_queue()
+{
+    queries_q = xQueueCreate(10, sizeof(Query_t *));
+    if (queries_q == NULL)
+        ESP_LOGE(TAG, "could not create message queue");
+
+    xTaskCreate(&queryMakerTask, "make queries", 8192 * 3, NULL, 5, NULL);
+}
+
+
+void sendMessageToAdmin(char * text)
 {
     const char * format = "{\"chat_id\": " TELEGRAM_BOT_ADMIN_ID ", \"text\": \"%s\"}";
     char * msg = malloc(strlen(format) + strlen(text) + 10);
     sprintf(msg, format, text);
-    query("sendMessage", msg);
-    free(msg);
+
+    make_query(SEND_MESSAGE, msg, false);
+}
+
+static void readUpdatesTask(void * pv)
+{
+    while (true)
+    {
+        make_query(GET_UPDATES, NULL, false);
+
+        // sleep for 60s
+        vTaskDelay(60000 / portTICK_PERIOD_MS);
+    }
 
     vTaskDelete(NULL);
 }
 
-void sendMessageToAdmin(char * text)
+void initTelegramBot(void)
 {
-    xTaskCreate(&sendMessageToAdminTask, "http main loop", 8192, text, 5, NULL);
+    init_query_queue();
+    make_query(DELETE_WEBHOOK, NULL, true);
+    xTaskCreate(&readUpdatesTask, "readUpdates", 8192, NULL, 5, NULL);
 }

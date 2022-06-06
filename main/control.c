@@ -65,7 +65,7 @@ static void control_relay(bool power_on)
     }
     else
     {
-        sendMessageToAdmin("Relay turned off");
+        sendMessageToAdmin("The starter turned off");
         ESP_LOGI("relay", "turning off");
     }
 }
@@ -87,7 +87,7 @@ static void open_relay(void)
     }
     else
     {
-        sendMessageToAdmin("Will turn on the relay in few seconds");
+        sendMessageToAdmin("Turning on the starter in few seconds");
         timer_handle = xTimerCreate("relay pin control off", pdMS_TO_TICKS(STARTER_ON_TIME * 1000), pdFALSE, NULL, timer_callback);
         if (timer_handle)
         {
