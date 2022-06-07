@@ -7,6 +7,7 @@
 #include "esp_tls.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/portmacro.h"
+#include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
@@ -15,6 +16,7 @@
 
 #include "bot.h"
 #include "esp_http_client.h"
+#include "tiny-json.h"
 
 #define MAX_HTTP_RECV_BUFFER 512
 #define MAX_HTTP_OUTPUT_BUFFER 2048
@@ -23,6 +25,10 @@
 #define TELEGRAM_BOT_ADMIN_ID CONFIG_TELEGRAM_BOT_ADMIN_ID
 
 static const char * TAG = "BOT";
+
+// global variables
+static QueueHandle_t queries_q = NULL;
+static int bot_update_id = 0;
 
 extern const char api_telegram_org_root_cert_start[] asm("_binary_api_telegram_org_root_cert_pem_start");
 extern const char api_telegram_org_root_cert_end[] asm("_binary_api_telegram_org_root_cert_pem_end");
@@ -40,7 +46,109 @@ typedef struct
     char * post_data;
 } Query_t;
 
-static QueueHandle_t queries_q = NULL;
+
+#define JSON_POOL_ARRAY_SIZE 32
+
+struct json_pool_array;
+typedef struct json_pool_array
+{
+    json_t * mem;
+    struct json_pool_array * prev;
+} json_pool_array_t;
+
+typedef struct
+{
+    json_pool_array_t * array;
+    unsigned int nextFree;
+    jsonPool_t pool;
+} json_pool_t;
+
+static json_t * poolAlloc(jsonPool_t * pool)
+{
+    json_pool_t * spool = json_containerOf(pool, json_pool_t, pool);
+    if (spool->nextFree >= JSON_POOL_ARRAY_SIZE)
+    {
+		json_pool_array_t *curarray = spool->array;
+		spool->array = malloc(sizeof(json_pool_array_t));
+		spool->array->mem = calloc(JSON_POOL_ARRAY_SIZE, sizeof(json_t));
+		spool->array->prev = curarray;
+        spool->nextFree = 0;
+    }
+
+    return &spool->array->mem[spool->nextFree++];
+}
+
+static json_t * poolInit(jsonPool_t * pool)
+{
+    json_pool_t * spool = json_containerOf(pool, json_pool_t, pool);
+    spool->nextFree = JSON_POOL_ARRAY_SIZE;
+    spool->array = NULL;
+
+    return poolAlloc(pool);
+}
+
+static void poolFree(json_pool_t * spool)
+{
+    json_pool_array_t * item = spool->array;
+    while (item != NULL)
+    {
+        json_pool_array_t * prev = item->prev;
+        free(item->mem);
+        free(item);
+        item = prev;
+    }
+}
+
+
+BaseType_t process_api_response(char * resp)
+{
+    BaseType_t res = pdPASS;
+    json_pool_t spool = {.pool = {.init = poolInit, .alloc = poolAlloc}, .array = NULL};
+    json_t const * json = json_createWithPool(resp, &spool.pool);
+    if (json == NULL)
+    {
+        res = pdFAIL;
+        ESP_LOGE(TAG, "could not parse json response");
+        goto cleanup;
+    }
+
+    json_t const * ok_prop = json_getProperty(json, "ok");
+    if (ok_prop == NULL)
+    {
+        ESP_LOGI(TAG, "got invalid response with no 'ok' field");
+        goto cleanup;
+    }
+
+    bool is_ok = json_getBoolean(ok_prop);
+    if (is_ok)
+    {
+        json_t const * result_prop = json_getProperty(json, "result");
+        if (result_prop && json_getType(result_prop) == JSON_ARRAY)
+        {
+            json_t const * item = json_getChild(result_prop);
+            while (item != NULL)
+            {
+                json_t const * update_id_prop = json_getProperty(item, "update_id");
+                if (update_id_prop != NULL)
+                {
+                    // we got an update object
+                    int update_id = json_getInteger(update_id_prop);
+                    if (update_id > bot_update_id)
+                    {
+                        bot_update_id = update_id;
+                        ESP_LOGI(TAG, "new update offset %d", bot_update_id);
+                    }
+                }
+                item = json_getSibling(item);
+            }
+        }
+    }
+
+cleanup:
+    poolFree(&spool);
+
+    return res;
+}
 
 bool make_query(TelegramMethod_t method, char * post_data, bool wait)
 {
@@ -87,7 +195,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t * evt)
             ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
             break;
         case HTTP_EVENT_ON_DATA:
-            ESP_LOGI(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+            ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
             /*
              *  Check for chunked encoding is added as the URL for chunked encoding used in this example returns binary data.
              *  However, event handler can also be used in case chunked encoding is used.
@@ -123,6 +231,7 @@ esp_err_t _http_event_handler(esp_http_client_event_t * evt)
             {
                 output_buffer[output_len] = '\0';
                 ESP_LOGI(TAG, "%s", output_buffer);
+                process_api_response(output_buffer);
                 free(output_buffer);
                 output_buffer = NULL;
             }
@@ -160,12 +269,12 @@ static void queryMakerTask(void * queue)
     esp_http_client_config_t config = {
         .host = "api.telegram.org",
         .path = "/",
-		.transport_type = HTTP_TRANSPORT_OVER_SSL,
+        .transport_type = HTTP_TRANSPORT_OVER_SSL,
         .cert_pem = api_telegram_org_root_cert_start,
         .timeout_ms = 5000,
         .event_handler = _http_event_handler,
         .is_async = true,
-		.keep_alive_enable = true,
+        .keep_alive_enable = true,
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
 
@@ -252,7 +361,7 @@ void init_query_queue()
     if (queries_q == NULL)
         ESP_LOGE(TAG, "could not create message queue");
 
-    xTaskCreate(&queryMakerTask, "make queries", 8192 * 3, NULL, 5, NULL);
+    xTaskCreate(&queryMakerTask, "make queries", 8192 * 3, queries_q, 5, NULL);
 }
 
 
@@ -269,7 +378,10 @@ static void readUpdatesTask(void * pv)
 {
     while (true)
     {
-        make_query(GET_UPDATES, NULL, false);
+        const char * format = "{\"allowed_updates\": [\"message\"], \"offset\": %d}";
+        char * msg = malloc(strlen(format) + 10);
+        sprintf(msg, format, bot_update_id + 1);
+        make_query(GET_UPDATES, msg, false);
 
         // sleep for 60s
         vTaskDelay(60000 / portTICK_PERIOD_MS);
@@ -281,6 +393,6 @@ static void readUpdatesTask(void * pv)
 void initTelegramBot(void)
 {
     init_query_queue();
-    make_query(DELETE_WEBHOOK, NULL, true);
+    // make_query(DELETE_WEBHOOK, NULL, true);
     xTaskCreate(&readUpdatesTask, "readUpdates", 8192, NULL, 5, NULL);
 }
