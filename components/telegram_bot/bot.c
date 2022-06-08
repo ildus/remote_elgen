@@ -10,6 +10,8 @@
 #include "freertos/projdefs.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
+#include "sdkconfig.h"
+
 #if CONFIG_MBEDTLS_CERTIFICATE_BUNDLE
 #    include "esp_crt_bundle.h"
 #endif
@@ -29,6 +31,7 @@ static const char * TAG = "BOT";
 // global variables
 static QueueHandle_t queries_q = NULL;
 static int bot_update_id = 0;
+static int64_t config_bot_admin_id = 0;
 
 extern const char api_telegram_org_root_cert_start[] asm("_binary_api_telegram_org_root_cert_pem_start");
 extern const char api_telegram_org_root_cert_end[] asm("_binary_api_telegram_org_root_cert_pem_end");
@@ -54,56 +57,72 @@ typedef struct json_pool_array
 {
     json_t * mem;
     struct json_pool_array * prev;
-} json_pool_array_t;
+} pool_array_t;
 
 typedef struct
 {
-    json_pool_array_t * array;
+    pool_array_t * array;
     unsigned int nextFree;
     jsonPool_t pool;
-} json_pool_t;
+} pool_t;
 
-static json_t * poolAlloc(jsonPool_t * pool)
+static json_t * pool_alloc(jsonPool_t * pool)
 {
-    json_pool_t * spool = json_containerOf(pool, json_pool_t, pool);
+    pool_t * spool = json_containerOf(pool, pool_t, pool);
     if (spool->nextFree >= JSON_POOL_ARRAY_SIZE)
     {
-		json_pool_array_t *curarray = spool->array;
-		spool->array = malloc(sizeof(json_pool_array_t));
-		spool->array->mem = calloc(JSON_POOL_ARRAY_SIZE, sizeof(json_t));
-		spool->array->prev = curarray;
+        pool_array_t * curarray = spool->array;
+        spool->array = malloc(sizeof(pool_array_t));
+        spool->array->mem = calloc(JSON_POOL_ARRAY_SIZE, sizeof(json_t));
+        spool->array->prev = curarray;
         spool->nextFree = 0;
     }
 
     return &spool->array->mem[spool->nextFree++];
 }
 
-static json_t * poolInit(jsonPool_t * pool)
+static json_t * pool_init(jsonPool_t * pool)
 {
-    json_pool_t * spool = json_containerOf(pool, json_pool_t, pool);
+    pool_t * spool = json_containerOf(pool, pool_t, pool);
     spool->nextFree = JSON_POOL_ARRAY_SIZE;
     spool->array = NULL;
 
-    return poolAlloc(pool);
+    return pool_alloc(pool);
 }
 
-static void poolFree(json_pool_t * spool)
+static void pool_free(pool_t * spool)
 {
-    json_pool_array_t * item = spool->array;
+    pool_array_t * item = spool->array;
     while (item != NULL)
     {
-        json_pool_array_t * prev = item->prev;
+        pool_array_t * prev = item->prev;
         free(item->mem);
         free(item);
         item = prev;
     }
 }
 
+void process_bot_command(const char * cmd, int len)
+{
+    if (strncmp(cmd, "/status", len) == 0)
+        sendMessageToAdmin("Working");
+    else if (strncmp(cmd, "/state", len) == 0)
+        sendMessageToAdmin("Not implemented");
+    else if (strncmp(cmd, "/starter_on", len) == 0)
+    {
+        sendMessageToAdmin("Not implemented");
+    }
+    else
+    {
+        sendMessageToAdmin("Not implemented");
+        ESP_LOGI(TAG, "unknown command: %s", cmd);
+    }
+}
 
 BaseType_t process_api_response(char * resp)
 {
     BaseType_t res = pdPASS;
-    json_pool_t spool = {.pool = {.init = poolInit, .alloc = poolAlloc}, .array = NULL};
+    pool_t spool = {.pool = {.init = pool_init, .alloc = pool_alloc}, .array = NULL};
     json_t const * json = json_createWithPool(resp, &spool.pool);
     if (json == NULL)
     {
@@ -138,14 +157,51 @@ BaseType_t process_api_response(char * resp)
                         bot_update_id = update_id;
                         ESP_LOGI(TAG, "new update offset %d", bot_update_id);
                     }
+
+                    json_t const * message_prop = json_getProperty(item, "message");
+                    if (message_prop)
+                    {
+                        // we got an update object with message object
+                        json_t const * from_prop = json_getProperty(message_prop, "from");
+                        json_t const * from_id_prop = json_getProperty(from_prop, "id");
+                        int sender_id = json_getInteger(from_id_prop);
+
+                        if (sender_id != config_bot_admin_id)
+                        {
+                            ESP_LOGI(TAG, "we got an update from not the admin, ignoring");
+                            goto skip;
+                        }
+
+                        const char * text = json_getPropertyValue(message_prop, "text");
+                        json_t const * entities_prop = json_getProperty(message_prop, "entities");
+
+                        if (entities_prop && json_getType(entities_prop) == JSON_ARRAY)
+                        {
+                            json_t const * entity_item = json_getChild(entities_prop);
+                            while (entity_item != NULL)
+                            {
+                                int entity_offset = json_getInteger(json_getProperty(entity_item, "offset"));
+                                int entity_len = json_getInteger(json_getProperty(entity_item, "length"));
+                                const char * entity_type = json_getPropertyValue(entity_item, "type");
+
+                                if (strcmp(entity_type, "bot_command") == 0)
+                                    process_bot_command(text + entity_offset, entity_len);
+
+                                entity_item = json_getSibling(entity_item);
+                            }
+                        }
+                        else
+                            ESP_LOGI(TAG, "skipping the message: not a command");
+                    }
                 }
+            skip:
                 item = json_getSibling(item);
             }
         }
     }
 
 cleanup:
-    poolFree(&spool);
+    pool_free(&spool);
 
     return res;
 }
@@ -392,6 +448,8 @@ static void readUpdatesTask(void * pv)
 
 void initTelegramBot(void)
 {
+    config_bot_admin_id = strtoll(CONFIG_TELEGRAM_BOT_ADMIN_ID, (char **)NULL, 10);
+
     init_query_queue();
     // make_query(DELETE_WEBHOOK, NULL, true);
     xTaskCreate(&readUpdatesTask, "readUpdates", 8192, NULL, 5, NULL);
