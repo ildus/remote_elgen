@@ -17,6 +17,7 @@
 #endif
 
 #include "bot.h"
+#include "control.h"
 #include "esp_http_client.h"
 #include "tiny-json.h"
 
@@ -110,7 +111,7 @@ void process_bot_command(const char * cmd, int len)
         sendMessageToAdmin("Not implemented");
     else if (strncmp(cmd, "/starter_on", len) == 0)
     {
-        sendMessageToAdmin("Not implemented");
+        open_relay();
     }
     else
     {

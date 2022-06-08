@@ -76,7 +76,7 @@ static void timer_callback(TimerHandle_t arg)
     control_relay(false);
 }
 
-static void open_relay(void)
+void open_relay(void)
 {
     static TimerHandle_t timer_handle = NULL;
 

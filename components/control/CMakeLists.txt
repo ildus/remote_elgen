@@ -1,4 +1,5 @@
 idf_component_register(
-	SRCS main.c
+	SRCS control.c
     INCLUDE_DIRS "."
+	REQUIRES driver telegram_bot
 )
