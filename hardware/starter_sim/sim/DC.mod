@@ -1,0 +1,6 @@
+.SUBCKT DC_MOTOR 1 2
+
+RA	1	3	0.5
+LA	3	2	0.0015
+
+.ENDS
